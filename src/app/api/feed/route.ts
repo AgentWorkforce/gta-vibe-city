@@ -1,6 +1,6 @@
 import { unstable_cache } from "next/cache";
 import { fromBridge } from "@/lib/bridge";
-import { relay, toFeedResponse } from "@/lib/relay";
+import { relay, relayKey, toFeedResponse } from "@/lib/relay";
 import type { FeedResponse } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -33,7 +33,7 @@ export async function GET() {
   try {
     const body =
       (process.env.BRIDGE_URL ? await getBridgeFeed() : null) ??
-      (process.env.RELAY_WORKSPACE_KEY
+      (relayKey()
         ? await getLiveFeed()
         : { ...EMPTY, generatedAt: new Date().toISOString() });
     return Response.json(body, {

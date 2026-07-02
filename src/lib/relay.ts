@@ -8,9 +8,18 @@ import type { AgentStatus, CrewAgent, FeedMessage, FeedResponse } from "./types"
 
 let client: AgentRelay | undefined;
 
+/**
+ * Credential for the read-only site surface. Prefer a scoped observer token
+ * (ot_live_…, relay v9+) over the workspace admin key (rk_live_…) — the site
+ * only reads, and only the observer token can hold the realtime stream.
+ */
+export function relayKey(): string | undefined {
+  return process.env.RELAY_OBSERVER_TOKEN ?? process.env.RELAY_WORKSPACE_KEY;
+}
+
 export function relay(): AgentRelay {
   return (client ??= new AgentRelay({
-    workspaceKey: process.env.RELAY_WORKSPACE_KEY!,
+    workspaceKey: relayKey()!,
     ...(process.env.RELAY_BASE_URL ? { baseUrl: process.env.RELAY_BASE_URL } : {}),
   }));
 }

@@ -1,6 +1,6 @@
 import { unstable_cache } from "next/cache";
 import { fromBridge } from "@/lib/bridge";
-import { relay, toFeedResponse } from "@/lib/relay";
+import { relay, relayKey, toFeedResponse } from "@/lib/relay";
 import type { ObserverResponse } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -57,7 +57,7 @@ export async function GET() {
   try {
     const body =
       (process.env.BRIDGE_URL ? await getBridgeObserver() : null) ??
-      (process.env.RELAY_WORKSPACE_KEY ? await getLiveObserver() : empty());
+      (relayKey() ? await getLiveObserver() : empty());
     return Response.json(body, {
       headers: { "Cache-Control": "s-maxage=3, stale-while-revalidate=10" },
     });

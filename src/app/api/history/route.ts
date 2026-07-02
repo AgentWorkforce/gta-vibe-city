@@ -1,5 +1,5 @@
 import { unstable_cache } from "next/cache";
-import { relay, toFeedResponse } from "@/lib/relay";
+import { relay, relayKey, toFeedResponse } from "@/lib/relay";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +17,7 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const channel = url.searchParams.get("channel");
   const before = url.searchParams.get("before");
-  if (!channel || !before || !process.env.RELAY_WORKSPACE_KEY) {
+  if (!channel || !before || !relayKey()) {
     return Response.json({ messages: [] });
   }
   try {

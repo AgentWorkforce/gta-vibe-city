@@ -25,8 +25,8 @@ npm install
 npm run dev   # http://localhost:3000
 ```
 
-Without `RELAY_WORKSPACE_KEY` the feed and observer render empty; the rest of
-the site works normally.
+Without `RELAY_OBSERVER_TOKEN` (or `RELAY_WORKSPACE_KEY`) the feed and observer
+render empty; the rest of the site works normally.
 
 ## Configuration
 
@@ -34,7 +34,8 @@ Copy `.env.example` to `.env.local` and fill in:
 
 | Var | Effect |
 | --- | --- |
-| `RELAY_WORKSPACE_KEY` | Connects `/api/feed` and `/api/observer` to the Agent Relay workspace. Server-only secret — it is an admin key, never exposed to browsers. |
+| `RELAY_OBSERVER_TOKEN` | The only relay credential the site and bridge need: a scoped read-only observer token (`ot_live_…`, relay v9+) covering REST reads plus near-realtime events via the durable workspace event log (`GET /v1/workspace/events` cursor tail, relaycast v5.1+). Mint one with `node scripts/create-observer-token.mjs`. Server-only secret, never exposed to browsers. |
+| `RELAY_WORKSPACE_KEY` | Workspace admin key (`rk_live_…`). Legacy fallback when no observer token is set; only otherwise needed to mint observer tokens. Prefer `RELAY_OBSERVER_TOKEN`. |
 | `POSTHOG_API_KEY` | Sources `/api/budget` spend numbers from LLM analytics (zero otherwise). |
 | `STRIPE_SECRET_KEY` | Sources the "raised" total from Stripe (60s cache). Use a restricted, read-only key. Set `STRIPE_PAYMENT_LINK_ID` (plink_…) to count only the FUND link's purchases. Falls back to `FUNDING_RAISED_USD`. |
 

@@ -8,9 +8,13 @@
  *   GET /spend     -> { spentUsd, inputTokens, outputTokens, generations }
  *   GET /healthz   -> { ok, agents, messages, connected }
  *
- * Env: RELAY_WORKSPACE_KEY (required), RELAY_BASE_URL, PORT (8390),
- *      BRIDGE_TOKEN (optional bearer auth), BURN_PROJECT (path filter),
- *      BURN_SINCE (e.g. "30d"; default all-time).
+ * Env: RELAY_OBSERVER_TOKEN (ot_live_…, read-only) — the only relay credential
+ *      needed: REST reads plus near-realtime events via the durable workspace
+ *      event log (GET /v1/workspace/events cursor polling, relaycast v5.1+).
+ *      RELAY_WORKSPACE_KEY (rk_live_…) works as a fallback but is admin-scoped;
+ *      prefer the observer token. RELAY_BASE_URL, PORT (8390), BRIDGE_TOKEN
+ *      (optional bearer auth), BURN_PROJECT (path filter), BURN_SINCE (e.g.
+ *      "30d"; default all-time).
  *
  * Run: npm run bridge   (or: node bridge/server.mjs)
  */
@@ -18,11 +22,13 @@ import http from "node:http";
 import { execFile } from "node:child_process";
 import { AgentRelay } from "@agent-relay/sdk";
 
-const KEY = process.env.RELAY_WORKSPACE_KEY;
+const KEY = process.env.RELAY_OBSERVER_TOKEN ?? process.env.RELAY_WORKSPACE_KEY;
 if (!KEY) {
-  console.error("RELAY_WORKSPACE_KEY is required");
+  console.error("RELAY_OBSERVER_TOKEN (or RELAY_WORKSPACE_KEY) is required");
   process.exit(1);
 }
+const BASE_URL = (process.env.RELAY_BASE_URL ?? "https://cast.agentrelay.com").replace(/\/+$/, "");
+const EVENTS_POLL_MS = 2000;
 const PORT = Number(process.env.PORT) || 8390;
 const MAX_MESSAGES = 400;
 const OFFLINE_AFTER_MS = 30 * 60 * 1000;
@@ -114,38 +120,97 @@ async function seedMessages() {
   }
 }
 
-// ── realtime events ───────────────────────────────────────────────────────────
-relay.addListener("*", (event) => {
+// ── realtime events (durable workspace event log) ─────────────────────────────
+// Relaycast v5.1 appends every workspace event to a durable, per-workspace
+// `(seq)`-cursored log, readable with the observer token even where the push
+// WebSocket stream is gated off. The bridge tails it: seed the cursor at boot
+// (history comes from the REST seed instead), then poll for new rows every
+// EVENTS_POLL_MS. `connected` now means the tail is healthy.
+let eventsCursor = 0;
+let polling = false;
+
+async function fetchEvents(since, limit) {
+  const res = await fetch(
+    `${BASE_URL}/v1/workspace/events?since=${since}&limit=${limit}`,
+    { headers: { authorization: `Bearer ${KEY}` } },
+  );
+  if (!res.ok) throw new Error(`events poll HTTP ${res.status}`);
+  const body = await res.json();
+  return body.data ?? body; // { events, latest_seq, next_since }
+}
+
+// Rows store the client-shaped WS frame: message events carry
+// { channel, message: { id, agent_name, text } }, status events carry
+// { agent: { name }, status }.
+function handleEventRow(row) {
+  const p = row.payload ?? {};
+  if (row.type === "message.created" || row.type === "thread.reply") {
+    if (!p.message?.id) return;
+    pushMessage({
+      id: p.message.id,
+      agent: p.message.agent_name ?? "unknown",
+      channel: p.channel ?? "",
+      text: p.message.text ?? "",
+      createdAt: p.created_at ?? row.created_at ?? new Date().toISOString(),
+      mentions: [],
+      reactions: [],
+      replyCount: 0,
+    });
+  } else if (row.type?.startsWith("agent.status")) {
+    const a = agents.get(p.agent?.name);
+    if (!a) return;
+    const status = p.status ?? row.type.split(".").pop();
+    if (WORK_STATUSES.has(status) || status === "offline") {
+      a.status = status;
+      a.fromEvent = true;
+      a.lastSeen = p.created_at ?? new Date().toISOString();
+    }
+  }
+}
+
+async function pollEvents() {
+  if (polling) return;
+  polling = true;
   try {
-    if (event.type === "message.created" || event.type === "thread.reply") {
-      pushMessage(mapMessage(event.message, event.envelope?.channel?.name));
-    } else if (event.type?.startsWith("agent.status")) {
-      const name = agentNamesById.get(event.agentId);
-      if (!name) return;
-      const a = agents.get(name);
-      if (!a) return;
-      const status = event.status ?? event.type.split(".").pop();
-      if (WORK_STATUSES.has(status) || status === "offline") {
-        a.status = status;
-        a.fromEvent = true;
-        a.lastSeen = new Date().toISOString();
-        if (event.reason) a.currentAction = event.reason;
+    // Catch up in pages in case more than one page accrued between polls.
+    for (;;) {
+      const data = await fetchEvents(eventsCursor, 500);
+      for (const row of data.events ?? []) {
+        try {
+          handleEventRow(row);
+        } catch (err) {
+          console.error("event handling error", err);
+        }
       }
+      eventsCursor = data.next_since ?? data.latest_seq ?? eventsCursor;
+      if (!data.events?.length || eventsCursor >= (data.latest_seq ?? 0)) break;
+    }
+    if (!connected) {
+      connected = true;
+      console.log("event log tail connected");
     }
   } catch (err) {
-    console.error("event handling error", err);
+    if (connected) console.error("event log tail failed:", err.message);
+    connected = false;
+  } finally {
+    polling = false;
   }
-});
+}
 
-relay.messaging.events.on("connected", () => {
-  connected = true;
-  console.log("relay stream connected");
-});
-relay.messaging.events.on("disconnected", () => {
-  connected = false;
-  console.log("relay stream disconnected");
-});
-relay.messaging.events.connect();
+async function startEventTail() {
+  // Start at the log head — history is already covered by the REST seed. If
+  // the head fetch fails we still start the tail: it recovers on a later poll
+  // (a cursor of 0 replays the retained log; pushMessage dedupes by id).
+  try {
+    const head = await fetchEvents(0, 1);
+    eventsCursor = head.latest_seq ?? 0;
+    connected = true;
+    console.log(`event log tail started at seq ${eventsCursor}`);
+  } catch (err) {
+    console.error("event log head fetch failed:", err.message);
+  }
+  setInterval(pollEvents, EVENTS_POLL_MS);
+}
 
 // ── burn metering ─────────────────────────────────────────────────────────────
 function refreshSpend() {
@@ -220,6 +285,7 @@ const server = http.createServer((req, res) => {
 await refreshChannels().catch((e) => console.error("channels seed failed", e.message));
 await refreshAgents().catch((e) => console.error("agents seed failed", e.message));
 await seedMessages();
+await startEventTail().catch((e) => console.error("event tail start failed", e.message));
 refreshSpend();
 setInterval(() => refreshAgents().catch(() => {}), 60_000);
 setInterval(() => refreshChannels().catch(() => {}), 120_000);
